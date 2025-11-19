@@ -5,6 +5,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+import os
+
+# Python path düzeltmesi - proje kökünü path'e ekle
+current_dir = os.path.dirname(os.path.abspath(__file__))
+src_dir = os.path.dirname(current_dir)
+project_root = os.path.dirname(src_dir)
+sys.path.insert(0, project_root)
 
 from hotel_bot.channels.telegram import run_telegram_bot
 

@@ -154,4 +154,32 @@ class SQLiteReservationAdapter:
             conn.commit()
             return len(rooms)
 
+    def delete_all_reservations(self) -> bool:
+        """Tüm rezervasyonları sil"""
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM reservations")
+            conn.commit()
+            return True
 
+    def delete_all_rooms(self) -> bool:
+        """Tüm odaları sil"""
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM rooms")
+            conn.commit()
+            return True
+
+    def create_custom_rooms(self) -> int:
+        """Özel odalar oluştur - sadece 2 oda"""
+        rooms = [
+            ("Lüks Suit", 2, 150.0, "available"),
+            ("Standart Oda", 2, 100.0, "available"),
+        ]
+        with self._conn() as conn:
+            cur = conn.cursor()
+            cur.executemany(
+                "INSERT INTO rooms (name, capacity, price_per_night, status) VALUES (?, ?, ?, ?)", rooms
+            )
+            conn.commit()
+            return len(rooms)  

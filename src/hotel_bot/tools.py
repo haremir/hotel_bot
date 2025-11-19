@@ -12,6 +12,15 @@ from hotel_bot.config import get_database_url
 _adapter: Optional[ReservationAdapter] = None
 
 
+def _with_reference_code(reservation: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """Ensure reservation dict contains a human friendly reference code."""
+    if not reservation:
+        return reservation
+    if "reference_code" not in reservation and reservation.get("id") is not None:
+        reservation["reference_code"] = f"RSV-{reservation['id']:06d}"
+    return reservation
+
+
 def get_adapter() -> ReservationAdapter:
     """Get or create the database adapter instance."""
     global _adapter
@@ -151,6 +160,13 @@ def create_reservation(
         Dict with reservation details including 'id'.
     """
     adapter = get_adapter()
+
+    if not phone and not email:
+        return {
+            "error": (
+                "Rezervasyon oluşturmak için en az bir iletişim bilgisi (telefon veya e-posta) sağlamalısınız."
+            )
+        }
     
     # Verify room exists and is available
     room = adapter.get_room(room_id)
@@ -185,6 +201,7 @@ def create_reservation(
         email=email,
         notes=notes,
     )
+    _with_reference_code(reservation)
     
     return {
         "success": True,
@@ -205,6 +222,7 @@ def get_reservation(reservation_id: int) -> Dict[str, Any]:
     """
     adapter = get_adapter()
     reservation = adapter.get_reservation(reservation_id)
+    _with_reference_code(reservation)
     
     if not reservation:
         return {"error": f"Reservation with ID {reservation_id} not found"}

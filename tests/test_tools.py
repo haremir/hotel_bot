@@ -240,6 +240,7 @@ class TestCreateReservation:
             assert reservation["email"] == "john@example.com"
             assert reservation["notes"] == "Test reservation"
             assert "id" in reservation
+            assert reservation["reference_code"].startswith("RSV-")
         finally:
             cleanup_test_db(td, db)
 
@@ -252,7 +253,8 @@ class TestCreateReservation:
                 full_name="John Doe",
                 check_in="2025-12-01",
                 check_out="2025-12-03",
-                guests=2
+                guests=2,
+                phone="+1234567890",
             )
 
             # Verify error response
@@ -284,7 +286,8 @@ class TestCreateReservation:
                 full_name="John Doe",
                 check_in="2025-12-01",
                 check_out="2025-12-03",
-                guests=10  # More than capacity
+                guests=10,  # More than capacity
+                phone="+1234567890",
             )
 
             # Verify error response
@@ -320,12 +323,35 @@ class TestCreateReservation:
                 full_name="Second User",
                 check_in="2025-12-02",
                 check_out="2025-12-04",
-                guests=2
+                guests=2,
+                phone="+1234567890",
             )
-
             # Verify error response
             assert "error" in result
             assert "reserved" in result["error"].lower() or "conflict" in result["error"].lower()
+        finally:
+            cleanup_test_db(td, db)
+
+    def test_create_reservation_requires_contact_info(self):
+        """Ensure at least one contact detail is required."""
+        td, db = setup_test_db()
+        try:
+            rooms = db.list_rooms(only_available=True)
+            if not rooms:
+                pytest.skip("No available rooms for test")
+
+            first_room = rooms[0]
+
+            result = create_reservation(
+                room_id=first_room["id"],
+                full_name="John Doe",
+                check_in="2025-12-01",
+                check_out="2025-12-03",
+                guests=2,
+            )
+
+            assert "error" in result
+            assert "iletişim" in result["error"]
         finally:
             cleanup_test_db(td, db)
 
@@ -374,6 +400,7 @@ class TestGetReservation:
             assert reservation["guests"] == 2
             assert reservation["phone"] == "+1234567890"
             assert reservation["email"] == "john@example.com"
+            assert reservation["reference_code"].startswith("RSV-")
         finally:
             cleanup_test_db(td, db)
 
