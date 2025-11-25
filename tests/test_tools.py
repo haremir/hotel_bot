@@ -31,12 +31,23 @@ def make_db_url(tmpdir: str) -> str:
     return f"sqlite:///{db_path}"
 
 
+def seed_sample_rooms(db: SQLiteReservationAdapter) -> None:
+    rooms = [
+        ("Standard 101", 2, 80.0, "available"),
+        ("Deluxe 201", 3, 120.0, "available"),
+        ("Suite 301", 4, 200.0, "available"),
+        ("Economy 001", 1, 60.0, "maintenance"),
+    ]
+    for name, capacity, price, status in rooms:
+        db.create_room(name=name, capacity=capacity, price_per_night=price, status=status)
+
+
 def setup_test_db():
     """Create and initialize a test database."""
     td = tempfile.TemporaryDirectory()
     db = SQLiteReservationAdapter(make_db_url(td.name))
     db.init()
-    db.insert_sample_rooms_if_empty()
+    seed_sample_rooms(db)
     set_adapter(db)
     return td, db
 

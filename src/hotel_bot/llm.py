@@ -9,11 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from hotel_bot.config import (
-    get_groq_api_key,
-    get_groq_model,
-    get_llm_timeout,
-)
+from hotel_bot.config import get_config
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +37,10 @@ class LLMClient:
             model: Model name (if None, will try to get from config)
             timeout: Request timeout in seconds (if None, will try to get from config)
         """
-        self.api_key = api_key or get_groq_api_key()
-        self.model = model or get_groq_model()
-        self.timeout = timeout or get_llm_timeout()
+        config = get_config()
+        self.api_key = api_key if api_key is not None else config.get_groq_api_key()
+        self.model = model if model is not None else config.get_groq_model()
+        self.timeout = timeout if timeout is not None else config.get_llm_timeout()
         self.use_groq = bool(self.api_key)
 
     def chat(
@@ -124,9 +121,10 @@ class LLMClient:
                 ollama_messages.append({"role": "user", "content": f"[System Context] {content}"})
             else:
                 ollama_messages.append({"role": role, "content": content})
-        
+
+        model_name = get_config().get_ollama_model()
         payload = {
-            "model": "llama3.2",  # Default Ollama model
+            "model": model_name,  # Config'ten alınan Ollama model adı
             "messages": ollama_messages,
             "stream": False,
         }

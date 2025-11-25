@@ -1,57 +1,135 @@
-
 from __future__ import annotations
 
+import importlib
 import os
-from typing import Optional
+from typing import Optional, Type
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:
     pass
 
-
-def get_database_url(default: Optional[str] = None) -> str:
-    """Get database URL from environment variable."""
-    return os.getenv("DATABASE_URL", default or "sqlite:///hotel_bot.db")
-
-
-def get_groq_api_key() -> Optional[str]:
-    """Get Groq API key from environment variable."""
-    return os.getenv("GROQ_API_KEY")
+from hotel_bot.base_config import HotelBotConfig
+from hotel_bot.adapters.base import ReservationAdapter
+from hotel_bot.adapters.sqlite_adapter import SQLiteReservationAdapter
+from hotel_bot.exceptions import ConfigurationError
 
 
-def get_groq_model(default: str = "llama-3.1-70b-versatile") -> str:
-    """Get Groq model name from environment variable."""
-    return os.getenv("GROQ_MODEL", default)
+DEFAULT_CONFIG_CLASS = "hotel_bot.config.EnvironmentHotelBotConfig"
+CONFIG_ENV_KEY = "HOTEL_BOT_CONFIG"
 
 
-def get_llm_timeout(default: int = 60) -> int:
-    """Get LLM timeout in seconds from environment variable."""
+# load_config_from_env fonksiyonu kaldırıldı
+
+
+def _import_config_class(path: str) -> Type[HotelBotConfig]:
     try:
-        return int(os.getenv("LLM_TIMEOUT", str(default)))
-    except (ValueError, TypeError):
-        return default
+        module_path, class_name = path.rsplit(".", 1)
+    except ValueError as exc:  # noqa: B904
+        raise ConfigurationError(f"Invalid config path '{path}'") from exc
+
+    try:
+        module = importlib.import_module(module_path)
+    except ImportError as exc:
+        raise ConfigurationError(f"Could not import module '{module_path}'") from exc
+
+    try:
+        cls = getattr(module, class_name)
+    except AttributeError as exc:
+        raise ConfigurationError(f"Config class '{class_name}' not found in '{module_path}'") from exc
+
+    if not issubclass(cls, HotelBotConfig):
+        raise ConfigurationError(f"{path} is not a subclass of HotelBotConfig")
+
+    return cls
 
 
-def get_telegram_bot_token() -> Optional[str]:
-    """Get Telegram bot token from environment variable."""
-    return os.getenv("TELEGRAM_BOT_TOKEN")
+class EnvironmentHotelBotConfig(HotelBotConfig):
+    """Default configuration that reads from environment variables."""
+
+    def __init__(self) -> None:
+        self._env = os.environ
+
+    def get_database_url(self) -> str:
+        return self._env.get("DATABASE_URL", "sqlite:///hotel_bot.db")
+
+    def get_groq_api_key(self) -> Optional[str]:
+        return self._env.get("GROQ_API_KEY")
+
+    def get_groq_model(self) -> str:
+        return self._env.get("GROQ_MODEL", "llama-3.1-70b-versatile")
+
+    def get_llm_timeout(self) -> int:
+        try:
+            return int(self._env.get("LLM_TIMEOUT", "60"))
+        except (TypeError, ValueError):
+            return 60
+
+    def get_telegram_bot_token(self) -> Optional[str]:
+        return self._env.get("TELEGRAM_BOT_TOKEN")
+
+    def get_hotel_display_name(self) -> str:
+        return self._env.get("HOTEL_NAME", "Hotel Bot")
+
+    def get_hotel_phone(self) -> Optional[str]:
+        return self._env.get("HOTEL_PHONE")
+
+    def get_hotel_email(self) -> Optional[str]:
+        return self._env.get("HOTEL_EMAIL")
+
+    def get_system_prompt(self) -> str:
+        prompt = self._env.get("HOTEL_SYSTEM_PROMPT")
+        if prompt:
+            return prompt
+        return super().get_system_prompt()
+    
+    # ⭐ YENİ: create_adapter implementation
+    def create_adapter(self) -> ReservationAdapter:
+        """
+        Create SQLite adapter using this config's database URL.
+        
+        Returns:
+            ReservationAdapter: Initialized SQLite adapter
+        """
+        db_url = self.get_database_url()
+        adapter = SQLiteReservationAdapter(db_url)
+        adapter.init()  # Initialize tables
+        
+        # Seed database if needed (demo data)
+        self.seed_database(adapter)
+        
+        return adapter
 
 
-def get_hotel_name(default: str = "Demo Hotel") -> str:
-    """Get hotel name from environment variable."""
-    return os.getenv("HOTEL_NAME", default)
+_CONFIG: Optional[HotelBotConfig] = None
 
 
-def get_hotel_phone() -> Optional[str]:
-    """Get hotel phone number from environment variable."""
-    return os.getenv("HOTEL_PHONE")
+def get_config() -> HotelBotConfig:
+    """
+    Get or create global config instance.
+    
+    Config class is determined by HOTEL_BOT_CONFIG env var,
+    defaulting to EnvironmentHotelBotConfig.
+    
+    Returns:
+        HotelBotConfig: Global config instance
+    """
+    global _CONFIG
+    if _CONFIG is None:
+        class_path = os.getenv(CONFIG_ENV_KEY, DEFAULT_CONFIG_CLASS)
+        cls = _import_config_class(class_path)
+        _CONFIG = cls()
+    return _CONFIG
 
 
-def get_hotel_email() -> Optional[str]:
-    """Get hotel email from environment variable."""
-    return os.getenv("HOTEL_EMAIL")
-
-
-
+def set_config(config: Optional[HotelBotConfig]) -> None:
+    """
+    Override cached config (useful for tests and manual setup).
+    
+    Args:
+        config: Config instance to use globally, or None to reset
+    """
+    global _CONFIG
+    _CONFIG = config

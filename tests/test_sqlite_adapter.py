@@ -18,8 +18,14 @@ def test_sqlite_adapter_crud_flow():
         try:
             # init schema and sample data
             db.init()
-            added = db.insert_sample_rooms_if_empty()
-            assert added in (0, 4)
+            rooms_to_create = [
+                ("Standard 101", 2, 80.0, "available"),
+                ("Deluxe 201", 3, 120.0, "available"),
+                ("Suite 301", 4, 200.0, "available"),
+                ("Economy 001", 1, 60.0, "maintenance"),
+            ]
+            for args in rooms_to_create:
+                db.create_room(*args)
 
             # rooms list and first available
             rooms = db.list_rooms()

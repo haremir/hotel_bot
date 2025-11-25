@@ -1,12 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from functools import wraps
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Optional
 
 from hotel_bot.adapters.base import ReservationAdapter
-from hotel_bot.adapters.sqlite_adapter import SQLiteReservationAdapter
-from hotel_bot.config import get_database_url
+from hotel_bot.config import get_config
 
 # Global adapter instance
 _adapter: Optional[ReservationAdapter] = None
@@ -21,18 +19,55 @@ def _with_reference_code(reservation: Optional[Dict[str, Any]]) -> Optional[Dict
     return reservation
 
 
+def _extract_reservation_id(reservation_id: Any) -> int:
+    """
+    Extract integer ID from reservation_id parameter.
+    Handles both integer IDs and RSV-XXXXXX format strings.
+    """
+    if isinstance(reservation_id, int):
+        return reservation_id
+    
+    if isinstance(reservation_id, str):
+        # Handle RSV-000005 format
+        if reservation_id.startswith("RSV-"):
+            try:
+                return int(reservation_id.split("-")[1])
+            except (IndexError, ValueError):
+                raise ValueError(f"Invalid reservation ID format: {reservation_id}")
+        # Try direct conversion
+        try:
+            return int(reservation_id)
+        except ValueError:
+            raise ValueError(f"Invalid reservation ID: {reservation_id}")
+    
+    raise ValueError(f"Reservation ID must be int or str, got {type(reservation_id)}")
+
+
 def get_adapter() -> ReservationAdapter:
-    """Get or create the database adapter instance."""
+    """
+    Get or create the database adapter instance from config.
+    
+    Adapter is created via config.create_adapter() which ensures
+    each tenant/hotel uses its own database configuration.
+    
+    Returns:
+        ReservationAdapter: Database adapter instance
+    """
     global _adapter
     if _adapter is None:
-        db_url = get_database_url()
-        _adapter = SQLiteReservationAdapter(db_url)
-        _adapter.init()
+        # ⭐ DEĞİŞTİ: Config'ten adapter oluştur
+        config = get_config()
+        _adapter = config.create_adapter()
     return _adapter
 
 
 def set_adapter(adapter: ReservationAdapter) -> None:
-    """Set a custom adapter instance (useful for testing)."""
+    """
+    Set a custom adapter instance (useful for testing).
+    
+    Args:
+        adapter: Adapter instance to use globally
+    """
     global _adapter
     _adapter = adapter
 
@@ -58,58 +93,72 @@ def _dates_overlap(
     return d1_in < d2_out and d2_in < d1_out
 
 
+def _validate_date_format(date_str: str) -> bool:
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+def _validate_phone(phone: str) -> bool:
+    digits = [c for c in phone if c.isdigit()]
+    return len(digits) >= 10
+
+def _validate_email(email: str) -> bool:
+    return "@" in email and "." in email
+
+
 @tool
-def get_room_prices() -> Dict[str, Any]:
+def get_room_prices() -> str:
     """
     Get prices for all available rooms.
     
     Returns:
-        Dict with 'rooms' list containing room information with prices.
+        Formatted string with room information and prices.
     """
     adapter = get_adapter()
     rooms = adapter.list_rooms(only_available=True)
     
-    return {
-        "rooms": [
-            {
-                "id": room["id"],
-                "name": room["name"],
-                "capacity": room["capacity"],
-                "price_per_night": room["price_per_night"],
-                "status": room["status"],
-            }
-            for room in rooms
-        ]
-    }
+    if not rooms:
+        return "Mevcut oda bulunmamaktadır."
+    
+    result = "Mevcut Odalar:\n"
+    for room in rooms:
+        result += f"\n• {room['name']}\n"
+        result += f"  Kapasite: {room['capacity']} kişi\n"
+        result += f"  Fiyat: ₺{room['price_per_night']}/gece\n"
+    
+    return result
 
 
 @tool
 def check_availability(
     check_in: str, check_out: str, guests: int
-) -> Dict[str, Any]:
+) -> str:
     """
-    Check room availability for given dates and number of guests.
+    Check room availability for given dates and guest count.
     
     Args:
-        check_in: Check-in date in YYYY-MM-DD format
-        check_out: Check-out date in YYYY-MM-DD format
+        check_in: Check-in date (YYYY-MM-DD)
+        check_out: Check-out date (YYYY-MM-DD)
         guests: Number of guests
     
     Returns:
-        Dict with 'available_rooms' list containing available rooms.
+        Formatted string with available rooms or error message.
     """
+    if not _validate_date_format(check_in):
+        return f"❌ Hata: Geçersiz giriş tarihi formatı. YYYY-MM-DD şeklinde giriniz."
+    if not _validate_date_format(check_out):
+        return f"❌ Hata: Geçersiz çıkış tarihi formatı. YYYY-MM-DD şeklinde giriniz."
     adapter = get_adapter()
     
-    # Get all available rooms that can accommodate the guests
     all_rooms = adapter.list_rooms(only_available=True)
     suitable_rooms = [r for r in all_rooms if r["capacity"] >= guests]
     
-    # Check for date conflicts
     available_rooms = []
     for room in suitable_rooms:
         reservations = adapter.list_reservations_for_room(room["id"])
         
-        # Check if any reservation overlaps with requested dates
         has_conflict = False
         for res in reservations:
             if _dates_overlap(check_in, check_out, res["check_in"], res["check_out"]):
@@ -124,12 +173,16 @@ def check_availability(
                 "price_per_night": room["price_per_night"],
             })
     
-    return {
-        "check_in": check_in,
-        "check_out": check_out,
-        "guests": guests,
-        "available_rooms": available_rooms,
-    }
+    if not available_rooms:
+        return f"❌ {check_in} - {check_out} tarihleri arasında {guests} kişi için uygun oda bulunmamaktadır."
+    
+    result = f"Uygun Odalar ({check_in} - {check_out}):\n"
+    for room in available_rooms:
+        result += f"\n• {room['name']} (ID: {room['id']})\n"
+        result += f"  Kapasite: {room['capacity']} kişi\n"
+        result += f"  Fiyat: ₺{room['price_per_night']}/gece\n"
+    
+    return result
 
 
 @tool
@@ -139,122 +192,271 @@ def create_reservation(
     check_in: str,
     check_out: str,
     guests: int,
-    phone: Optional[str] = None,
-    email: Optional[str] = None,
+    phone: str,
+    email: str,
     notes: Optional[str] = None,
-) -> Dict[str, Any]:
+) -> str:
     """
     Create a new reservation.
     
     Args:
-        room_id: ID of the room to reserve
-        full_name: Full name of the guest
-        check_in: Check-in date in YYYY-MM-DD format
-        check_out: Check-out date in YYYY-MM-DD format
+        room_id: Room ID
+        full_name: Guest full name
+        check_in: Check-in date (YYYY-MM-DD)
+        check_out: Check-out date (YYYY-MM-DD)
         guests: Number of guests
-        phone: Optional phone number
-        email: Optional email address
+        phone: Phone number
+        email: Email address
         notes: Optional notes
     
     Returns:
-        Dict with reservation details including 'id'.
+        Formatted string with reservation details or error message.
     """
+    if not _validate_date_format(check_in):
+        return f"❌ Hata: Geçersiz giriş tarihi formatı. YYYY-MM-DD şeklinde giriniz."
+    if not _validate_date_format(check_out):
+        return f"❌ Hata: Geçersiz çıkış tarihi formatı. YYYY-MM-DD şeklinde giriniz."
+    if not _validate_phone(phone):
+        return "❌ Hata: Geçersiz telefon numarası. Lütfen en az 10 haneli bir numara giriniz."
+    if not _validate_email(email):
+        return "❌ Hata: Geçersiz e-posta adresi. Lütfen geçerli bir e-posta giriniz."
     adapter = get_adapter()
 
-    if not phone and not email:
-        return {
-            "error": (
-                "Rezervasyon oluşturmak için en az bir iletişim bilgisi (telefon veya e-posta) sağlamalısınız."
-            )
-        }
+    if not phone or not phone.strip():
+        return "❌ Hata: Telefon numarası zorunludur. Lütfen geçerli bir telefon numarası sağlayınız."
     
-    # Verify room exists and is available
+    if not email or not email.strip():
+        return "❌ Hata: E-posta adresi zorunludur. Lütfen geçerli bir e-posta sağlayınız."
+    
     room = adapter.get_room(room_id)
     if not room:
-        return {"error": f"Room with ID {room_id} not found"}
+        return f"❌ Hata: ID {room_id} ile oda bulunamadı."
     
     if room["status"] != "available":
-        return {"error": f"Room {room_id} is not available (status: {room['status']})"}
+        return f"❌ Hata: Oda {room_id} müsait değil (Durum: {room['status']})"
     
-    # Check capacity
     if room["capacity"] < guests:
-        return {
-            "error": f"Room {room_id} can only accommodate {room['capacity']} guests, but {guests} requested"
-        }
+        return f"❌ Hata: Oda {room_id} sadece {room['capacity']} kişi alabilir, {guests} kişi istendi."
     
-    # Check for date conflicts
     reservations = adapter.list_reservations_for_room(room_id)
     for res in reservations:
         if _dates_overlap(check_in, check_out, res["check_in"], res["check_out"]):
-            return {
-                "error": f"Room {room_id} is already reserved for the requested dates"
-            }
+            return f"❌ Hata: Oda {room_id} istenilen tarihler için zaten rezerve edilmiş."
     
-    # Create reservation
     reservation = adapter.create_reservation(
         room_id=room_id,
         full_name=full_name,
         check_in=check_in,
         check_out=check_out,
         guests=guests,
-        phone=phone,
-        email=email,
+        phone=phone.strip(),
+        email=email.strip(),
         notes=notes,
     )
     _with_reference_code(reservation)
     
-    return {
-        "success": True,
-        "reservation": reservation,
-    }
+    result = "Rezervasyon başarıyla oluşturuldu!\n"
+    result += f"\nReferans Kodu: {reservation['reference_code']}\n"
+    result += f"Misafir: {reservation['full_name']}\n"
+    result += f"Oda: {room['name']} (ID: {room_id})\n"
+    result += f"Giriş: {reservation['check_in']}\n"
+    result += f"Çıkış: {reservation['check_out']}\n"
+    result += f"Kişi Sayısı: {reservation['guests']}\n"
+    result += f"Telefon: {phone.strip()}\n"
+    result += f"E-posta: {email.strip()}\n"
+    if notes:
+        result += f"Notlar: {notes}\n"
+    
+    return result
 
 
 @tool
-def get_reservation(reservation_id: int) -> Dict[str, Any]:
+def update_reservation(
+    reservation_id: Any,
+    room_id: Optional[int] = None,
+    full_name: Optional[str] = None,
+    check_in: Optional[str] = None,
+    check_out: Optional[str] = None,
+    guests: Optional[int] = None,
+    phone: Optional[str] = None,
+    email: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> str:
+    """
+    Update an existing reservation.
+    
+    Args:
+        reservation_id: Reservation ID (integer or RSV-XXXXXX format)
+        room_id: New room ID (optional)
+        full_name: New guest name (optional)
+        check_in: New check-in date (optional, YYYY-MM-DD)
+        check_out: New check-out date (optional, YYYY-MM-DD)
+        guests: New guest count (optional)
+        phone: New phone number (optional)
+        email: New email address (optional)
+        notes: New notes (optional)
+    
+    Returns:
+        Formatted string with updated reservation details or error message.
+    """
+    adapter = get_adapter()
+    
+    # Extract reservation ID
+    try:
+        res_id = _extract_reservation_id(reservation_id)
+    except ValueError as e:
+        return f"❌ Hata: {str(e)}"
+    
+    # Get existing reservation
+    existing = adapter.get_reservation(res_id)
+    if not existing:
+        return f"❌ Hata: ID {res_id} ile rezervasyon bulunamadı."
+    
+    # Prepare updated fields (keep existing if not provided)
+    new_room_id = room_id if room_id is not None else existing["room_id"]
+    new_full_name = full_name if full_name is not None else existing["full_name"]
+    new_check_in = check_in if check_in is not None else existing["check_in"]
+    new_check_out = check_out if check_out is not None else existing["check_out"]
+    new_guests = guests if guests is not None else existing["guests"]
+    new_phone = phone.strip() if phone is not None else existing.get("phone", "")
+    new_email = email.strip() if email is not None else existing.get("email", "")
+    new_notes = notes if notes is not None else existing.get("notes")
+    
+    # Validate dates if provided
+    if check_in and not _validate_date_format(check_in):
+        return f"❌ Hata: Geçersiz giriş tarihi formatı. YYYY-MM-DD şeklinde giriniz."
+    if check_out and not _validate_date_format(check_out):
+        return f"❌ Hata: Geçersiz çıkış tarihi formatı. YYYY-MM-DD şeklinde giriniz."
+    
+    # Validate phone and email if provided
+    if phone and not _validate_phone(phone):
+        return "❌ Hata: Geçersiz telefon numarası. Lütfen en az 10 haneli bir numara giriniz."
+    if email and not _validate_email(email):
+        return "❌ Hata: Geçersiz e-posta adresi. Lütfen geçerli bir e-posta giriniz."
+    
+    # Check room availability and capacity
+    room = adapter.get_room(new_room_id)
+    if not room:
+        return f"❌ Hata: ID {new_room_id} ile oda bulunamadı."
+    
+    if room["status"] != "available":
+        return f"❌ Hata: Oda {new_room_id} müsait değil (Durum: {room['status']})"
+    
+    if room["capacity"] < new_guests:
+        return f"❌ Hata: Oda {new_room_id} sadece {room['capacity']} kişi alabilir, {new_guests} kişi istendi."
+    
+    # ⭐ ÖNEMLİ: Tarih çakışması kontrolü - KENDİ REZERVASYONUNU HARIÇ TUT
+    reservations = adapter.list_reservations_for_room(new_room_id)
+    for res in reservations:
+        # Kendi rezervasyonumuzu atla
+        if res["id"] == res_id:
+            continue
+        
+        # Diğer rezervasyonlarla çakışma kontrolü
+        if _dates_overlap(new_check_in, new_check_out, res["check_in"], res["check_out"]):
+            return f"❌ Hata: Oda {new_room_id} bu tarihler için başka bir rezervasyonla çakışıyor."
+    
+    # Update reservation
+    updated = adapter.update_reservation(
+        reservation_id=res_id,
+        room_id=new_room_id,
+        full_name=new_full_name,
+        check_in=new_check_in,
+        check_out=new_check_out,
+        guests=new_guests,
+        phone=new_phone,
+        email=new_email,
+        notes=new_notes,
+    )
+    
+    if not updated:
+        return f"❌ Hata: Rezervasyon {res_id} güncellenemedi."
+    
+    _with_reference_code(updated)
+    
+    result = "Rezervasyon başarıyla güncellendi!\n"
+    result += f"\nReferans Kodu: {updated['reference_code']}\n"
+    result += f"Misafir: {updated['full_name']}\n"
+    result += f"Oda: {room['name']} (ID: {new_room_id})\n"
+    result += f"Giriş: {updated['check_in']}\n"
+    result += f"Çıkış: {updated['check_out']}\n"
+    result += f"Kişi Sayısı: {updated['guests']}\n"
+    if updated.get('phone'):
+        result += f"Telefon: {updated['phone']}\n"
+    if updated.get('email'):
+        result += f"E-posta: {updated['email']}\n"
+    if updated.get('notes'):
+        result += f"Notlar: {updated['notes']}\n"
+    
+    return result
+
+
+@tool
+def get_reservation(reservation_id: Any) -> str:
     """
     Get reservation details by ID.
     
     Args:
-        reservation_id: ID of the reservation
+        reservation_id: Reservation ID (integer or RSV-XXXXXX format)
     
     Returns:
-        Dict with reservation details or error message.
+        Formatted string with reservation details or error message.
     """
     adapter = get_adapter()
-    reservation = adapter.get_reservation(reservation_id)
+    
+    try:
+        res_id = _extract_reservation_id(reservation_id)
+    except ValueError as e:
+        return f"❌ Hata: {str(e)}"
+    
+    reservation = adapter.get_reservation(res_id)
     _with_reference_code(reservation)
     
     if not reservation:
-        return {"error": f"Reservation with ID {reservation_id} not found"}
+        return f"❌ Hata: ID {res_id} ile rezervasyon bulunamadı."
     
-    return {"reservation": reservation}
+    result = "Rezervasyon Detayları:\n"
+    result += f"\nReferans Kodu: {reservation['reference_code']}\n"
+    result += f"Misafir: {reservation['full_name']}\n"
+    result += f"Oda ID: {reservation['room_id']}\n"
+    result += f"Giriş: {reservation['check_in']}\n"
+    result += f"Çıkış: {reservation['check_out']}\n"
+    result += f"Kişi Sayısı: {reservation['guests']}\n"
+    if reservation.get('phone'):
+        result += f"Telefon: {reservation['phone']}\n"
+    if reservation.get('email'):
+        result += f"E-posta: {reservation['email']}\n"
+    if reservation.get('notes'):
+        result += f"Notlar: {reservation['notes']}\n"
+    
+    return result
 
 
 @tool
-def cancel_reservation(reservation_id: int) -> Dict[str, Any]:
+def cancel_reservation(reservation_id: Any) -> str:
     """
     Cancel a reservation by ID.
     
     Args:
-        reservation_id: ID of the reservation to cancel
+        reservation_id: Reservation ID (integer or RSV-XXXXXX format)
     
     Returns:
-        Dict with success status or error message.
+        Formatted string with success status or error message.
     """
     adapter = get_adapter()
     
-    # Verify reservation exists
-    reservation = adapter.get_reservation(reservation_id)
-    if not reservation:
-        return {"error": f"Reservation with ID {reservation_id} not found"}
+    try:
+        res_id = _extract_reservation_id(reservation_id)
+    except ValueError as e:
+        return f"❌ Hata: {str(e)}"
     
-    # Delete reservation
-    success = adapter.delete_reservation(reservation_id)
+    reservation = adapter.get_reservation(res_id)
+    if not reservation:
+        return f"❌ Hata: ID {res_id} ile rezervasyon bulunamadı."
+    
+    success = adapter.delete_reservation(res_id)
     
     if success:
-        return {
-            "success": True,
-            "message": f"Reservation {reservation_id} has been cancelled",
-        }
+        return f"✅ Rezervasyon {res_id} başarıyla iptal edilmiştir."
     else:
-        return {"error": f"Failed to cancel reservation {reservation_id}"}
+        return f"❌ Hata: Rezervasyon {res_id} iptal edilemedi."

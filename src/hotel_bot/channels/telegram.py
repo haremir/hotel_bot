@@ -10,8 +10,8 @@ from functools import partial
 from typing import Any, Dict, List, Optional
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
-from langchain_groq import ChatGroq
 from langchain_core.tools import StructuredTool
+from langchain_groq import ChatGroq
 from telegram import Update
 from telegram.ext import (
     Application,
@@ -21,7 +21,7 @@ from telegram.ext import (
     filters,
 )
 
-from hotel_bot.config import get_groq_api_key, get_groq_model, get_telegram_bot_token
+from hotel_bot.config import get_config
 from hotel_bot.prompts import get_system_prompt
 from hotel_bot.tools import (
     cancel_reservation,
@@ -30,84 +30,14 @@ from hotel_bot.tools import (
     get_adapter,
     get_reservation,
     get_room_prices,
+    update_reservation,
 )
 
 logger = logging.getLogger(__name__)
 
-
-def format_tool_result(result: Dict[str, Any]) -> str:
-    """Format tool result for display."""
-    if "error" in result:
-        return f"❌ Hata: {result['error']}"
-    
-    if "success" in result and result["success"]:
-        if "reservation" in result:
-            res = result["reservation"]
-            reference_code = res.get('reference_code') or f"RSV-{res.get('id')}"
-            return (
-                f"✅ Rezervasyon oluşturuldu!\n\n"
-                f"Referans: {reference_code}\n"
-                f"Rezervasyon ID: {res.get('id')}\n"
-                f"Oda ID: {res.get('room_id')}\n"
-                f"İsim: {res.get('full_name')}\n"
-                f"Giriş: {res.get('check_in')}\n"
-                f"Çıkış: {res.get('check_out')}\n"
-                f"Misafir Sayısı: {res.get('guests')}\n"
-                f"Telefon: {res.get('phone') or '—'}\n"
-                f"E-posta: {res.get('email') or '—'}\n"
-                f"Not: {res.get('notes') or '—'}"
-            )
-        elif "message" in result:
-            return f"✅ {result['message']}"
-    
-    if "rooms" in result:
-        rooms = result["rooms"]
-        if not rooms:
-            return "❌ Şu anda müsait oda bulunmamaktadır."
-        lines = ["🏨 Müsait Odalar ve Fiyatlar:\n"]
-        for room in rooms:
-            lines.append(
-                f"• {room['name']} - {room['price_per_night']}₺/gece "
-                f"(Kapasite: {room['capacity']} kişi)"
-            )
-        return "\n".join(lines)
-    
-    if "available_rooms" in result:
-        rooms = result["available_rooms"]
-        if not rooms:
-            return (
-                f"❌ {result.get('check_in')} - {result.get('check_out')} tarihleri arasında "
-                f"{result.get('guests')} kişilik müsait oda bulunmamaktadır."
-            )
-        lines = [
-            f"✅ {result.get('check_in')} - {result.get('check_out')} tarihleri arasında "
-            f"{result.get('guests')} kişilik müsait odalar:\n"
-        ]
-        for room in rooms:
-            lines.append(
-                f"• Oda {room['id']}: {room['name']} - {room['price_per_night']}₺/gece "
-                f"(Kapasite: {room['capacity']} kişi)"
-            )
-        return "\n".join(lines)
-    
-    if "reservation" in result:
-        res = result["reservation"]
-        reference_code = res.get('reference_code') or f"RSV-{res.get('id')}"
-        return (
-            f"📋 Rezervasyon Detayları:\n\n"
-            f"Referans: {reference_code}\n"
-            f"ID: {res.get('id')}\n"
-            f"Oda ID: {res.get('room_id')}\n"
-            f"İsim: {res.get('full_name')}\n"
-            f"Giriş: {res.get('check_in')}\n"
-            f"Çıkış: {res.get('check_out')}\n"
-            f"Misafir Sayısı: {res.get('guests')}\n"
-            f"Telefon: {res.get('phone') or '—'}\n"
-            f"E-posta: {res.get('email') or '—'}\n"
-            f"Not: {res.get('notes') or '—'}"
-        )
-    
-    return json.dumps(result, indent=2, ensure_ascii=False)
+# Timeout settings
+TOOL_LOOP_TIMEOUT = 45  # seconds for tool execution
+LLM_CALL_TIMEOUT = 30   # seconds for single LLM call
 
 
 def create_langchain_tools() -> List[StructuredTool]:
@@ -130,14 +60,19 @@ def create_langchain_tools() -> List[StructuredTool]:
             description="Create a new reservation. Always ensure you have room_id, guest name, dates, and guest count before calling.",
         ),
         StructuredTool.from_function(
+            func=update_reservation,
+            name="update_reservation",
+            description="Update an existing reservation. Only call when user provides reservation ID and fields to update.",
+        ),
+        StructuredTool.from_function(
             func=get_reservation,
             name="get_reservation",
-            description="Get reservation details by reservation_id.",
+            description="Get reservation details by reservation_id. Only call when user provides a reservation ID.",
         ),
         StructuredTool.from_function(
             func=cancel_reservation,
             name="cancel_reservation",
-            description="Cancel an existing reservation by reservation_id.",
+            description="Cancel an existing reservation by reservation_id. Only call when user provides a reservation ID.",
         ),
     ]
 
@@ -168,25 +103,19 @@ def get_llm() -> ChatGroq:
     """Create or return cached LLM instance."""
     global _llm
     if _llm is None:
-        api_key = get_groq_api_key()
+        config = get_config()
+        api_key = config.get_groq_api_key()
         if not api_key:
             raise ValueError("GROQ_API_KEY is not set in environment variables")
-        model_name = get_groq_model()
+        model_name = config.get_groq_model()
         _llm = ChatGroq(
             model=model_name,
             groq_api_key=api_key,
             temperature=0.4,
+            timeout=LLM_CALL_TIMEOUT,  # ⭐ Timeout ekledik
+            max_retries=2,  # ⭐ Retry ekledik
         )
     return _llm
-
-
-def _ensure_database_seeded() -> None:
-    """Ensure SQLite adapter has base data."""
-    try:
-        adapter = get_adapter()
-        adapter.insert_sample_rooms_if_empty()
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Failed to seed database: %s", exc)
 
 
 def _prepare_history(context: ContextTypes.DEFAULT_TYPE) -> List[Any]:
@@ -206,12 +135,17 @@ def _trim_history(messages: List[Any], limit: int = 12) -> List[Any]:
     return system_messages[:1] + trimmed
 
 
-# Seed database once when module is imported
-_ensure_database_seeded()
-
-
 def _run_tool_loop(user_message: str, history: List[Any]) -> tuple[str, List[Any]]:
-    """Blocking helper that runs the tool-calling loop."""
+    """
+    Blocking helper that runs the tool-calling loop.
+    
+    Returns:
+        Tuple of (response_text, updated_messages)
+    
+    Raises:
+        TimeoutError: If execution takes too long
+        Exception: For other errors
+    """
     llm = get_llm()
     tools = get_tools()
     tool_map = get_tool_map()
@@ -220,135 +154,242 @@ def _run_tool_loop(user_message: str, history: List[Any]) -> tuple[str, List[Any
     messages: List[Any] = list(history)
     human_msg = HumanMessage(content=user_message)
     messages.append(human_msg)
-    tool_outputs: List[str] = []
 
     max_iterations = 4
-    for _ in range(max_iterations):
-        ai_message: AIMessage = llm_with_tools.invoke(messages)
-        messages.append(ai_message)
+    for iteration in range(max_iterations):
+        try:
+            logger.info(f"Tool loop iteration {iteration + 1}/{max_iterations}")
+            
+            # Call LLM
+            ai_message: AIMessage = llm_with_tools.invoke(messages)
+            messages.append(ai_message)
 
-        if not ai_message.tool_calls:
-            content = ai_message.content
-            if isinstance(content, list):
-                content = " ".join(
-                    part["text"]
-                    for part in content
-                    if isinstance(part, dict) and part.get("type") == "text"
-                )
-            response_text = str(content).strip()
-            if tool_outputs:
-                formatted_outputs = "\n\n".join(tool_outputs)
-                if formatted_outputs not in response_text:
-                    response_text = (
-                        f"{response_text}\n\n{formatted_outputs}" if response_text else formatted_outputs
+            # Check if we have a final response (no tool calls)
+            if not ai_message.tool_calls:
+                content = ai_message.content
+                if isinstance(content, list):
+                    content = " ".join(
+                        part["text"]
+                        for part in content
+                        if isinstance(part, dict) and part.get("type") == "text"
                     )
-            return response_text, messages
+                response_text = str(content).strip()
+                logger.info("Got final response from LLM")
+                return response_text, messages
 
-        tool_messages: List[ToolMessage] = []
-        for call in ai_message.tool_calls:
-            tool_name = call.get("name")
-            tool_call_id = call.get("id")
-            args = call.get("args", {})
-            tool = tool_map.get(tool_name)
-            if not tool:
+            # Execute tool calls
+            tool_messages: List[ToolMessage] = []
+            for call in ai_message.tool_calls:
+                tool_name = call.get("name")
+                tool_call_id = call.get("id")
+                args = call.get("args", {})
+                
+                logger.info(f"Executing tool: {tool_name} with args: {args}")
+                
+                tool = tool_map.get(tool_name)
+                if not tool:
+                    error_msg = f"İstenilen {tool_name} aracı bulunamadı."
+                    logger.error(error_msg)
+                    tool_messages.append(
+                        ToolMessage(
+                            content=error_msg,
+                            tool_call_id=tool_call_id,
+                            name=tool_name or "unknown_tool",
+                        )
+                    )
+                    continue
+
+                try:
+                    result = tool.invoke(args)
+                    logger.info(f"Tool {tool_name} executed successfully")
+                except Exception as exc:
+                    logger.error("Tool %s failed: %s", tool_name, exc, exc_info=True)
+                    result = f"❌ Araç çalıştırılırken hata oluştu: {str(exc)}"
+
                 tool_messages.append(
                     ToolMessage(
-                        content=f"İstenilen {tool_name} aracı bulunamadı.",
+                        content=result,
                         tool_call_id=tool_call_id,
-                        name=tool_name or "unknown_tool",
+                        name=tool_name,
                     )
                 )
-                continue
 
-            try:
-                raw_result = tool.invoke(args)
-                formatted_result = format_tool_result(raw_result)
-            except Exception as exc:  # noqa: BLE001
-                logger.error("Tool %s failed: %s", tool_name, exc, exc_info=True)
-                formatted_result = f"❌ Araç çalıştırılırken hata oluştu: {exc}"
-
-            tool_outputs.append(formatted_result)
-            tool_messages.append(
-                ToolMessage(
-                    content=formatted_result,
-                    tool_call_id=tool_call_id,
-                    name=tool_name,
-                )
-            )
-
-        messages.extend(tool_messages)
+            messages.extend(tool_messages)
+            
+        except Exception as e:
+            logger.error(f"Error in tool loop iteration {iteration}: {e}", exc_info=True)
+            # Rate limit hatası kontrolü
+            if "rate_limit" in str(e).lower() or "429" in str(e):
+                raise Exception("API rate limit aşıldı. Lütfen birkaç saniye bekleyip tekrar deneyin.")
+            # Timeout hatası
+            if "timeout" in str(e).lower():
+                raise TimeoutError("İstek zaman aşımına uğradı. Lütfen tekrar deneyin.")
+            # Diğer hatalar
+            raise
 
     # If we've exhausted max_iterations, return fallback
+    logger.warning("Tool loop exhausted max iterations")
     fallback = (
         "İşlem tamamlanamadı. Lütfen isteğinizi daha net bir şekilde tekrarlar mısınız?"
     )
-    if tool_outputs:
-        formatted_outputs = "\n\n".join(tool_outputs)
-        fallback = f"{fallback}\n\n{formatted_outputs}"
     return fallback, messages
 
 
 async def handle_message_with_agent(
     user_message: str, context: ContextTypes.DEFAULT_TYPE
 ) -> str:
-    """Async wrapper around the blocking tool loop."""
+    """
+    Async wrapper around the blocking tool loop with timeout.
+    
+    Returns:
+        Response text
+        
+    Raises:
+        TimeoutError: If processing takes too long
+        Exception: For other errors
+    """
     history = _prepare_history(context)
     history_snapshot = list(history)
 
     loop = asyncio.get_running_loop()
-    response, updated_messages = await loop.run_in_executor(
-        None, partial(_run_tool_loop, user_message, history_snapshot)
-    )
-
-    context.user_data["history"] = _trim_history(updated_messages)
-    return response
+    
+    try:
+        # ⭐ Timeout ile çalıştır
+        response, updated_messages = await asyncio.wait_for(
+            loop.run_in_executor(
+                None, 
+                partial(_run_tool_loop, user_message, history_snapshot)
+            ),
+            timeout=TOOL_LOOP_TIMEOUT
+        )
+        
+        context.user_data["history"] = _trim_history(updated_messages)
+        return response
+        
+    except asyncio.TimeoutError:
+        logger.error(f"Tool loop timed out after {TOOL_LOOP_TIMEOUT} seconds")
+        raise TimeoutError(
+            f"İşlem {TOOL_LOOP_TIMEOUT} saniyeden fazla sürdü. "
+            "Lütfen daha basit bir istek ile tekrar deneyin."
+        )
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start command."""
-    hotel_name = context.bot_data.get("hotel_name", "Otelimiz")
-    welcome_message = (
-        f"🏨 Hoş geldiniz! {hotel_name}'e rezervasyon asistanıyım.\n\n"
-        f"Size nasıl yardımcı olabilirim?\n\n"
-        f"Yapabileceğim işlemler:\n"
-        f"• Oda fiyatlarını gösterme\n"
-        f"• Müsaitlik kontrolü\n"
-        f"• Rezervasyon oluşturma\n"
-        f"• Rezervasyon sorgulama\n"
-        f"• Rezervasyon iptali\n\n"
-        f"Örnek: 'Oda fiyatlarınızı görebilir miyim?' veya "
-        f"'25 Aralık için müsait odanız var mı?'"
-    )
-    await update.message.reply_text(welcome_message)
+    try:
+        hotel_name = context.bot_data.get("hotel_name") or get_config().get_hotel_display_name()
+        welcome_message = (
+            f"🏨 Hoş geldiniz! {hotel_name}'e rezervasyon asistanıyım.\n\n"
+            f"Size nasıl yardımcı olabilirim?\n\n"
+            f"Yapabileceğim işlemler:\n"
+            f"• Oda fiyatlarını gösterme\n"
+            f"• Müsaitlik kontrolü\n"
+            f"• Rezervasyon oluşturma\n"
+            f"• Rezervasyon güncelleme\n"
+            f"• Rezervasyon sorgulama\n"
+            f"• Rezervasyon iptali\n\n"
+            f"Örnek: 'Oda fiyatlarınızı görebilir miyim?' veya "
+            f"'25 Aralık için müsait odanız var mı?'"
+        )
+        await update.message.reply_text(welcome_message)
+    except Exception as e:
+        logger.error(f"Error in start_command: {e}", exc_info=True)
+        await update.message.reply_text(
+            "⚠️ Bir hata oluştu. Lütfen tekrar /start yazın."
+        )
 
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle regular text messages."""
+    """Handle regular text messages with comprehensive error handling."""
     user_message = update.message.text
     
-    # Show typing indicator
-    await context.bot.send_chat_action(
-        chat_id=update.effective_chat.id, action="typing"
-    )
-    
-    # Process message with agent
-    response = await handle_message_with_agent(user_message, context)
-    
-    # Send response
-    await update.message.reply_text(response)
+    try:
+        # Show typing indicator
+        await context.bot.send_chat_action(
+            chat_id=update.effective_chat.id, 
+            action="typing"
+        )
+        
+        logger.info(f"Processing message from user {update.effective_user.id}: {user_message[:50]}...")
+        
+        # Process message with agent
+        response = await handle_message_with_agent(user_message, context)
+        
+        # Kaçış karakterlerini temizle ve formatla
+        response = response.replace("\\n", "\n")
+        
+        # Maksimum 4096 karaktere böl (Telegram limiti)
+        if len(response) > 4096:
+            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
+            for chunk in chunks:
+                await update.message.reply_text(chunk)
+        else:
+            await update.message.reply_text(response)
+            
+        logger.info("Message processed successfully")
+        
+    except asyncio.TimeoutError as e:
+        logger.error(f"Timeout error: {e}")
+        error_message = (
+            "⏱️ İşlem çok uzun sürdü.\n\n"
+            "Lütfen:\n"
+            "• Daha basit bir soru sorun\n"
+            "• Birkaç saniye bekleyip tekrar deneyin\n\n"
+            "Sorun devam ederse /start ile yeniden başlayın."
+        )
+        await update.message.reply_text(error_message)
+        
+    except Exception as e:
+        error_str = str(e).lower()
+        logger.error(f"Error in message_handler: {e}", exc_info=True)
+        
+        # Spesifik hata mesajları
+        if "rate_limit" in error_str or "429" in error_str:
+            error_message = (
+                "⚠️ API limit aşıldı.\n\n"
+                "Lütfen 10-15 saniye bekleyip tekrar deneyin."
+            )
+        elif "timeout" in error_str:
+            error_message = (
+                "⏱️ Bağlantı zaman aşımına uğradı.\n\n"
+                "Lütfen tekrar deneyin."
+            )
+        elif "api key" in error_str or "unauthorized" in error_str:
+            error_message = (
+                "🔑 API anahtarı hatası.\n\n"
+                "Lütfen yönetici ile iletişime geçin."
+            )
+        else:
+            error_message = (
+                "❌ Beklenmeyen bir hata oluştu.\n\n"
+                "Lütfen:\n"
+                "• Mesajınızı tekrar gönderin\n"
+                "• Sorun devam ederse /start ile yeniden başlayın\n\n"
+                f"Hata kodu: {type(e).__name__}"
+            )
+        
+        await update.message.reply_text(error_message)
 
 
 def create_telegram_app() -> Application:
     """Create and configure Telegram application."""
-    token = get_telegram_bot_token()
+    config = get_config()
+    token = config.get_telegram_bot_token()
     if not token:
         raise ValueError(
             "TELEGRAM_BOT_TOKEN environment variable is not set. "
             "Please add it to your .env file."
         )
     
-    # Create application
-    application = Application.builder().token(token).build()
+    # Create application with timeout settings
+    application = (
+        Application.builder()
+        .token(token)
+        .connect_timeout(30)  # ⭐ Connection timeout
+        .read_timeout(30)     # ⭐ Read timeout
+        .write_timeout(30)    # ⭐ Write timeout
+        .build()
+    )
     
     # Add handlers
     application.add_handler(CommandHandler("start", start_command))
@@ -357,8 +398,7 @@ def create_telegram_app() -> Application:
     )
     
     # Store hotel name in bot data
-    from hotel_bot.config import get_hotel_name
-    application.bot_data["hotel_name"] = get_hotel_name()
+    application.bot_data["hotel_name"] = config.get_hotel_display_name()
     
     return application
 
@@ -370,7 +410,9 @@ async def run_telegram_bot() -> None:
     logger.info("Starting Telegram bot...")
     await application.initialize()
     await application.start()
-    await application.updater.start_polling()
+    await application.updater.start_polling(
+        drop_pending_updates=True  # ⭐ Eski mesajları atla
+    )
     
     logger.info("Telegram bot is running. Press Ctrl+C to stop.")
     
