@@ -1,50 +1,45 @@
-# hote_bot
-This project is an artificial intelligence-supported reservation system for hotels.
+# hotel_bot
 
-hotel-bot-core/
-├── src/hotel_bot/
-│   ├── __init__.py
-│   ├── main.py                 # Entry point
-│   ├── config.py               # Ayarlar
-│   │
-│   ├── llm.py                  # Groq + Llama (fallback)
-│   ├── prompts.py              # System promptlar
-│   ├── tools.py                # Rezervasyon fonksiyonları
-│   │
-│   ├── channels/               # ⭐ KANAL KLASÖRÜ
-│   │   ├── __init__.py
-│   │   ├── telegram.py         # Telegram bot
-│   │   ├── whatsapp.py         # WhatsApp (sonra)
-│   │   └── instagram.py        # Instagram (sonra)
-│   │
-│   └── adapters/               # ⭐ VERİTABANI ADAPTERLARI
-│       ├── __init__.py
-│       ├── base.py             # Abstract base class
-│       ├── sqlite_adapter.py   # SQLite için
-│       ├── excel_adapter.py    # Excel için
-│       └── api_adapter.py      # API'ler için (HotelRunner vb.)
-│
-├── tests/
-├── .env.example
-├── pyproject.toml
-├── README.md
-└── .gitignore
+AI destekli çok-kanal otel rezervasyon asistanı. Modern Python, Groq (Llama), özelleştirilebilir adapter ve tool mimarisi ile Telegram başta olmak üzere birden fazla platformdan kullanılabilir.
 
-## Quickstart
+---
 
-1) Create and fill your environment variables:
+## Özellikler
 
-Create a `.env` file based on the keys below and set your credentials (Groq, Telegram, etc.).
+- **Ana Akıllı Fonksiyonlar:**
+  - Oda fiyatı, müsaitlik, rezervasyon oluşturma (flow kontrollü), rezervasyon sorgulama, iptal ve güncelleme.
+  - Tüm rezervasyon işlemleri için zorunlu doğrulama: tarih, isim, telefon (10+ hane), email (geçerli format) kontrolü.
+  - Tüm cevaplarda gerçek müşteri dilini otomatik algılayıp kullanır (Türkçe/İngilizce).
 
-Required variables:
+- **Tool/Fonksiyon Listesi:**
+  - `get_room_prices` — Oda ve fiyat listesini getirir (daima DB'den!).
+  - `check_availability` — Belirli tarihlerde uygun odaları listeler.
+  - `create_reservation` — Tüm müşteri ve rezervasyon bilgileri tam ise rezervasyon oluşturur.
+  - `get_reservation` — Referans ya da ID ile rezervasyon bilgilerini getirir.
+  - `cancel_reservation` — Rezervasyon iptal işlemleri (ID/Referans ile).
+  - `update_reservation` — Belirli alanlarda (tarih, kişi sayısı, oda vb.) değişiklik yapar.
 
-```
+- **Gelişmiş Özellikler:**
+  - SQLite tabanlı veri saklama (adapter ile gelişmiş veri kaynakları eklenebilir: Excel, API vb.)
+  - LLM fallback: Önce Groq, başarısız olursa Ollama (lokal) ile yanıt
+  - Doğrudan Groq, Telegram yapılandırması için kolay .env desteği
+  - Her şey Python ile modüler ve kolay özelleştirilebilir!
+
+---
+
+## Kolay Kurulum ve Kullanım
+
+1) **Ortam Değişkenlerini Tanımla**
+
+Bir `.env` dosyasına aşağıdakileri ekle:
+
+```env
 ENV=development
 
 GROQ_PROVIDER=groq
 GROQ_API_KEY=your_groq_api_key_here
 GROQ_MODEL=llama-3.1-70b-versatile
-LLM_TIMEOUT=60
+LLM_TIMEOUT=15
 
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token_here
 
@@ -55,20 +50,66 @@ HOTEL_PHONE=+90 555 555 55 55
 HOTEL_EMAIL=info@demo-hotel.com
 ```
 
-2) Install dependencies (with uv or pip):
+2) **Bağımlılıkları yükle**
 
 ```bash
-uv sync
-# or
+uv sync       # ya da
 pip install -e .
 ```
 
-3) Run Telegram bot:
+3) **Botu çalıştır**
 
 ```bash
 python -m src.hotel_bot.main
 ```
 
-Notes:
-- LLM is powered by Groq's Llama model. Ensure `GROQ_API_KEY` is valid.
-- WhatsApp and Instagram channel stubs are present to be implemented later.
+---
+
+## Kullanım Akışı
+
+- Kullanıcı bir platformdan (örn. Telegram) mesaj gönderir.
+- Asistan müşterinin dilini algılar.
+- Sadece gerçek ve eksiksiz bilgiyle rezervasyon oluşturur.
+- Tüm oda ve rezervasyon bilgisini daima ilgili veritabanı araçları ile (tool fonksiyonları) sağlar. Hayali/placeholder veri veya varsayım **kullanmaz**.
+- Yanıt akışı ve tool zorunlulukları PROMPT ile merkezi olarak yönetilir.
+
+---
+
+## Sistem Promptu & Zorunlu Akış
+
+Model aşağıdaki iş akışına keskin şekilde uyar:
+
+```
+You are a professional hotel reservation assistant.
+
+CRITICAL: Respond in customer's language (Turkish/English/etc.)
+
+ALWAYS USE TOOLS FOR:
+- Room prices → get_room_prices
+- Availability → check_availability
+- Reservation lookup → get_reservation (need ID)
+- Cancel reservation → cancel_reservation (need ID)
+- New booking → create_reservation (after getting all info)
+
+NEVER DESCRIBE ROOMS WITHOUT get_room_prices!
+NEVER ANSWER RESERVATION QUERIES WITHOUT get_reservation/cancel_reservation!
+
+MANDATORY FLOW:
+1. Ask check-in date
+2. Ask check-out date
+3. Call check_availability
+4. Ask for guest count
+5. Ask for full name (verify real)
+6. Ask for phone (10+ digits)
+7. Ask for email (@ and domain)
+8. Verify all data is real
+9. Only then call create_reservation
+```
+
+---
+
+## Test & Geliştirici Notları
+
+- Tüm fonksiyonlar için birim testleri `tests/` klasöründe.
+- Gelişmiş validasyon araçları ve veri entegrasyonu için adapter ve config yapıları kullanılabilir.
+- Bot kodu ve akışı, baştan sona modüler şekilde özelleştirilebilir.
